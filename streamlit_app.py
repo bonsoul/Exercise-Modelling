@@ -1,34 +1,30 @@
 """Exercise Coach Starter
 
-This Streamlit app is a lightweight starter for an exercise dataset product.
+This Streamlit app can load data from:
+- a local folder or CSV file
+- a public GitHub repository URL
 
-It supports two common dataset layouts:
+It automatically looks for:
+- tabular files such as CSV/TSV
+- image datasets organized by class folders
 
-1. Tabular data in CSV files with a label column such as `label`, `class`,
-   `target`, or `exercise`.
-2. Image datasets organized by class folder, for example:
-
-   data/
-     squat/
-       img001.jpg
-       img002.jpg
-     pushup/
-       img101.jpg
-
-The app gives you:
-- dataset exploration
-- a simple baseline model
-- batch prediction for new CSV rows or images
-
-It is intentionally dependency-light so you can turn it into a real MVP fast.
+Once loaded, it can train a lightweight baseline model and let you test
+predictions inside the app.
 """
 
 from __future__ import annotations
 
 import io
 import pickle
+import tempfile
+import zipfile
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
@@ -45,7 +41,8 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
-IMAGE_UPLOAD_TYPES = sorted(ext.lstrip(".") for ext in IMAGE_EXTENSIONS)
+TABULAR_EXTENSIONS = {".csv", ".tsv"}
+DEFAULT_GITHUB_REPO_URL = "https://github.com/bonsoul/exercises-dataset"
 TARGET_CANDIDATES = (
     "label",
     "class",
@@ -58,8 +55,38 @@ TARGET_CANDIDATES = (
 )
 
 
+def running_under_streamlit() -> bool:
+    """Detect whether the script is executing inside Streamlit runtime."""
+
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+    except Exception:
+        return False
+
+    return get_script_run_ctx(suppress_warning=True) is not None
+
+
+def cache_data(*decorator_args, **decorator_kwargs):
+    """Apply Streamlit caching only when the app is running under Streamlit."""
+
+    if running_under_streamlit():
+        return st.cache_data(*decorator_args, **decorator_kwargs)
+
+    def decorator(func):
+        return func
+
+    return decorator
+
+
+@dataclass(frozen=True)
+class GitHubRepo:
+    owner: str
+    name: str
+    branch_hint: str | None = None
+
+
 def make_one_hot_encoder() -> OneHotEncoder:
-    """Support both older and newer scikit-learn versions."""
+    """Support both newer and older scikit-learn versions."""
 
     try:
         return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
@@ -67,63 +94,165 @@ def make_one_hot_encoder() -> OneHotEncoder:
         return OneHotEncoder(handle_unknown="ignore", sparse=False)
 
 
-def infer_target_column(columns: Sequence[str]) -> str | None:
-    lowered = {col.lower(): col for col in columns}
+def infer_target_column(columns: Iterable[str]) -> str | None:
+    lookup = {str(col).lower(): col for col in columns}
     for candidate in TARGET_CANDIDATES:
-        if candidate in lowered:
-            return lowered[candidate]
+        if candidate in lookup:
+            return lookup[candidate]
     return None
-
-
-def find_first_csv(path: Path) -> Path | None:
-    if path.is_file() and path.suffix.lower() in {".csv", ".tsv"}:
-        return path
-
-    candidates = sorted(
-        [p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in {".csv", ".tsv"}]
-    )
-    return candidates[0] if candidates else None
-
-
-@st.cache_data(show_spinner=False)
-def load_csv(csv_path: str) -> pd.DataFrame:
-    path = Path(csv_path)
-    if path.suffix.lower() == ".tsv":
-        return pd.read_csv(path, sep="\t")
-    return pd.read_csv(path, sep=None, engine="python")
 
 
 def is_image_file(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
 
 
-@st.cache_data(show_spinner=False)
-def discover_image_samples(root_path: str) -> pd.DataFrame:
-    root = Path(root_path)
-    rows: list[dict[str, str | None]] = []
+def is_tabular_file(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in TABULAR_EXTENSIONS
 
-    for path in sorted(root.rglob("*")):
-        if not is_image_file(path):
+
+def parse_github_repo_url(url: str) -> GitHubRepo:
+    """Extract owner/repo and an optional branch hint from a GitHub URL."""
+
+    parsed = urlparse(url.strip())
+    if parsed.netloc not in {"github.com", "www.github.com"}:
+        raise ValueError("Please enter a public GitHub repository URL.")
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 2:
+        raise ValueError("That GitHub URL does not look like a repository URL.")
+
+    owner = parts[0]
+    name = parts[1].removesuffix(".git")
+    branch_hint = None
+    if len(parts) >= 4 and parts[2] in {"tree", "blob"}:
+        branch_hint = parts[3]
+
+    return GitHubRepo(owner=owner, name=name, branch_hint=branch_hint)
+
+
+def download_and_extract_github_repo(repo_url: str, preferred_branch: str | None = None) -> tuple[Path, str]:
+    """Download a public GitHub repository zip and extract it locally."""
+
+    repo = parse_github_repo_url(repo_url)
+    branch_candidates = []
+    for branch in (repo.branch_hint, preferred_branch, "main", "master"):
+        if branch and branch not in branch_candidates:
+            branch_candidates.append(branch)
+
+    last_error: Exception | None = None
+    for branch in branch_candidates:
+        zip_url = f"https://github.com/{repo.owner}/{repo.name}/archive/refs/heads/{branch}.zip"
+        try:
+            request = Request(zip_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen(request, timeout=60) as response:
+                zip_bytes = response.read()
+
+            extract_dir = Path(tempfile.mkdtemp(prefix=f"{repo.name}-{branch}-"))
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+                archive.extractall(extract_dir)
+
+            children = [child for child in extract_dir.iterdir() if child.is_dir()]
+            root = children[0] if len(children) == 1 else extract_dir
+            return root, branch
+        except (HTTPError, URLError, zipfile.BadZipFile, OSError) as exc:
+            last_error = exc
             continue
 
-        rel_parts = path.relative_to(root).parts
+    raise RuntimeError(
+        f"Could not download {repo.owner}/{repo.name} from GitHub. "
+        f"Last error: {last_error}"
+    )
+
+
+@cache_data(show_spinner=False)
+def load_csv_file(csv_path: str) -> pd.DataFrame:
+    path = Path(csv_path)
+    if path.suffix.lower() == ".tsv":
+        return pd.read_csv(path, sep="\t")
+    return pd.read_csv(path, sep=None, engine="python")
+
+
+def discover_tabular_files(root: Path) -> list[Path]:
+    if root.is_file():
+        return [root] if is_tabular_file(root) else []
+    return sorted([path for path in root.rglob("*") if is_tabular_file(path)])
+
+
+def discover_image_dataset_roots(root: Path, min_images: int = 2) -> list[dict]:
+    """Rank plausible image dataset roots by image count and depth."""
+
+    if root.is_file():
+        return []
+
+    image_files = [path for path in root.rglob("*") if is_image_file(path)]
+    stats: dict[Path, dict[str, object]] = {}
+
+    for image_path in image_files:
+        ancestors = [image_path.parent, *image_path.parents[1:]]
+        for ancestor in ancestors:
+            if ancestor == ancestor.parent:
+                break
+            try:
+                rel = image_path.relative_to(ancestor)
+            except ValueError:
+                continue
+            if len(rel.parts) < 2:
+                continue
+
+            info = stats.setdefault(ancestor, {"count": 0, "labels": set()})
+            info["count"] = int(info["count"]) + 1
+            labels = info["labels"]
+            assert isinstance(labels, set)
+            labels.add(rel.parts[0])
+
+    candidates: list[dict] = []
+    for candidate_root, info in stats.items():
+        labels = info["labels"]
+        assert isinstance(labels, set)
+        count = int(info["count"])
+        if count < min_images or len(labels) < 2:
+            continue
+        try:
+            depth = len(candidate_root.relative_to(root).parts)
+        except ValueError:
+            continue
+        candidates.append(
+            {
+                "path": candidate_root,
+                "image_count": count,
+                "label_count": len(labels),
+                "depth": depth,
+            }
+        )
+
+    candidates.sort(key=lambda item: (item["image_count"], item["depth"]), reverse=True)
+    return candidates
+
+
+def discover_image_samples(root: Path, dataset_root: Path) -> pd.DataFrame:
+    rows: list[dict[str, str | None]] = []
+    for path in sorted(dataset_root.rglob("*")):
+        if not is_image_file(path):
+            continue
+        try:
+            rel_parts = path.relative_to(dataset_root).parts
+        except ValueError:
+            continue
         label = rel_parts[0] if len(rel_parts) > 1 else None
         rows.append({"path": str(path), "label": label})
-
     return pd.DataFrame(rows)
 
 
 def image_to_vector(path: str | Path, image_size: int) -> np.ndarray:
-    with Image.open(path) as img:
-        arr = np.asarray(img.convert("RGB").resize((image_size, image_size)), dtype=np.float32)
-    return (arr / 255.0).reshape(-1)
+    with Image.open(path) as image:
+        array = np.asarray(image.convert("RGB").resize((image_size, image_size)), dtype=np.float32)
+    return (array / 255.0).reshape(-1)
 
 
 def uploaded_image_to_vector(uploaded_file, image_size: int) -> np.ndarray:
-    data = uploaded_file.getvalue()
-    with Image.open(io.BytesIO(data)) as img:
-        arr = np.asarray(img.convert("RGB").resize((image_size, image_size)), dtype=np.float32)
-    return (arr / 255.0).reshape(-1)
+    with Image.open(io.BytesIO(uploaded_file.getvalue())) as image:
+        array = np.asarray(image.convert("RGB").resize((image_size, image_size)), dtype=np.float32)
+    return (array / 255.0).reshape(-1)
 
 
 def safe_train_test_split(X, y, test_size: float):
@@ -138,12 +267,16 @@ def safe_train_test_split(X, y, test_size: float):
         return train_test_split(X, y, test_size=test_size, random_state=42)
 
 
-def build_tabular_pipeline(df: pd.DataFrame, target_col: str) -> tuple[Pipeline, dict, pd.DataFrame, pd.Series, pd.Series, list[str]]:
+def build_tabular_pipeline(
+    df: pd.DataFrame,
+    target_col: str,
+    test_size: float,
+) -> tuple[Pipeline, dict, list[str]]:
     X = df.drop(columns=[target_col]).copy()
     y = df[target_col].copy()
 
     numeric_features = X.select_dtypes(include=["number", "bool"]).columns.tolist()
-    categorical_features = [c for c in X.columns if c not in numeric_features]
+    categorical_features = [column for column in X.columns if column not in numeric_features]
 
     transformers = []
     if numeric_features:
@@ -174,56 +307,29 @@ def build_tabular_pipeline(df: pd.DataFrame, target_col: str) -> tuple[Pipeline,
         )
 
     preprocess = ColumnTransformer(transformers=transformers, remainder="drop")
-    model = RandomForestClassifier(
-        n_estimators=300,
-        random_state=42,
-        n_jobs=-1,
-    )
+    model = RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1)
     pipeline = Pipeline(steps=[("preprocess", preprocess), ("model", model)])
 
-    X_train, X_test, y_train, y_test = safe_train_test_split(X, y, test_size=0.2)
+    X_train, X_test, y_train, y_test = safe_train_test_split(X, y, test_size=test_size)
     pipeline.fit(X_train, y_train)
-    preds = pipeline.predict(X_test)
+    predictions = pipeline.predict(X_test)
 
     metrics = {
-        "accuracy": accuracy_score(y_test, preds),
+        "accuracy": accuracy_score(y_test, predictions),
         "report": pd.DataFrame(
-            classification_report(y_test, preds, output_dict=True, zero_division=0)
+            classification_report(y_test, predictions, output_dict=True, zero_division=0)
         ).T,
         "confusion": pd.crosstab(
             pd.Series(y_test, name="actual"),
-            pd.Series(preds, name="predicted"),
+            pd.Series(predictions, name="predicted"),
             dropna=False,
         ),
     }
     feature_columns = X.columns.tolist()
-    return pipeline, metrics, X_test, y_test, preds, feature_columns
+    return pipeline, metrics, feature_columns
 
 
-def align_tabular_frame(df: pd.DataFrame, feature_columns: Sequence[str]) -> pd.DataFrame:
-    aligned = df.copy()
-    for column in feature_columns:
-        if column not in aligned.columns:
-            aligned[column] = np.nan
-    return aligned.loc[:, list(feature_columns)]
-
-
-def sample_image_frame(frame: pd.DataFrame, max_per_class: int) -> pd.DataFrame:
-    if frame.empty or "label" not in frame.columns:
-        return frame
-
-    labeled = frame[frame["label"].notna()].copy()
-    if labeled.empty or max_per_class <= 0:
-        return labeled
-
-    return (
-        labeled.groupby("label", group_keys=False)
-        .apply(lambda group: group.sample(n=min(len(group), max_per_class), random_state=42))
-        .reset_index(drop=True)
-    )
-
-
-def build_image_model(samples: pd.DataFrame, image_size: int, test_size: float) -> tuple[Pipeline, dict, np.ndarray, np.ndarray, np.ndarray]:
+def build_image_model(samples: pd.DataFrame, image_size: int, test_size: float) -> tuple[Pipeline, dict]:
     vectors = []
     labels = []
     skipped = 0
@@ -238,7 +344,7 @@ def build_image_model(samples: pd.DataFrame, image_size: int, test_size: float) 
             skipped += 1
 
     if len(vectors) < 2:
-        raise ValueError("Not enough readable labeled images to train a model.")
+        raise ValueError("Not enough labeled, readable images to train a baseline model.")
 
     X = np.asarray(vectors)
     y = np.asarray(labels)
@@ -252,40 +358,68 @@ def build_image_model(samples: pd.DataFrame, image_size: int, test_size: float) 
         random_state=42,
     )
     model.fit(X_train, y_train)
-    preds = model.predict(X_test)
+    predictions = model.predict(X_test)
 
     metrics = {
-        "accuracy": accuracy_score(y_test, preds),
+        "accuracy": accuracy_score(y_test, predictions),
         "report": pd.DataFrame(
-            classification_report(y_test, preds, output_dict=True, zero_division=0)
+            classification_report(y_test, predictions, output_dict=True, zero_division=0)
         ).T,
         "skipped": skipped,
     }
     pipeline = Pipeline(steps=[("model", model)])
-    return pipeline, metrics, X_test, y_test, preds
+    return pipeline, metrics
 
 
-def render_overview_cards(df: pd.DataFrame, target_col: str | None = None) -> None:
-    cols = st.columns(4)
-    cols[0].metric("Rows", f"{len(df):,}")
-    cols[1].metric("Columns", f"{df.shape[1]:,}")
-    cols[2].metric("Missing cells", f"{int(df.isna().sum().sum()):,}")
-    if target_col and target_col in df.columns:
-        cols[3].metric("Classes", f"{df[target_col].nunique(dropna=True):,}")
-    else:
-        cols[3].metric("Classes", "n/a")
+def align_tabular_frame(df: pd.DataFrame, feature_columns: list[str]) -> pd.DataFrame:
+    aligned = df.copy()
+    for column in feature_columns:
+        if column not in aligned.columns:
+            aligned[column] = np.nan
+    return aligned.loc[:, feature_columns]
+
+
+def render_inventory(root: Path) -> None:
+    files = [root] if root.is_file() else [path for path in root.rglob("*") if path.is_file()]
+    if not files:
+        st.warning("The loaded repo/folder does not contain any files.")
+        return
+
+    ext_counts = Counter(path.suffix.lower() or "[no ext]" for path in files)
+    inventory_df = pd.DataFrame(
+        sorted(ext_counts.items(), key=lambda item: item[1], reverse=True),
+        columns=["extension", "count"],
+    )
+    st.markdown("#### File inventory")
+    st.dataframe(inventory_df, use_container_width=True)
+
+    preview = pd.DataFrame({"path": [str(path) for path in files[:50]]})
+    st.markdown("#### First files")
+    st.dataframe(preview, use_container_width=True)
 
 
 def render_tabular_mode(df: pd.DataFrame, source_label: str, test_size: float) -> None:
     st.subheader("Tabular dataset")
     st.caption(f"Source: {source_label}")
-    render_overview_cards(df)
 
+    cols = st.columns(4)
+    cols[0].metric("Rows", f"{len(df):,}")
+    cols[1].metric("Columns", f"{df.shape[1]:,}")
+    cols[2].metric("Missing cells", f"{int(df.isna().sum().sum()):,}")
     target_default = infer_target_column(df.columns)
+    if target_default and target_default in df.columns:
+        cols[3].metric("Classes", f"{df[target_default].nunique(dropna=True):,}")
+    else:
+        cols[3].metric("Classes", "n/a")
+
+    target_index = 0
+    if target_default in df.columns:
+        target_index = list(df.columns).index(target_default)
+
     target_col = st.selectbox(
         "Choose the target column",
         options=list(df.columns),
-        index=list(df.columns).index(target_default) if target_default in df.columns else 0,
+        index=target_index,
     )
 
     left, right = st.columns([1.2, 0.8])
@@ -294,22 +428,26 @@ def render_tabular_mode(df: pd.DataFrame, source_label: str, test_size: float) -
         st.dataframe(df.head(25), use_container_width=True)
     with right:
         st.markdown("#### Data profile")
-        st.write("Top missing columns")
         missing = df.isna().sum().sort_values(ascending=False)
-        st.dataframe(missing[missing > 0].head(10).to_frame("missing"), use_container_width=True)
+        missing = missing[missing > 0]
+        if not missing.empty:
+            st.dataframe(missing.head(10).to_frame("missing"), use_container_width=True)
+        else:
+            st.info("No missing values detected.")
+
         st.write("Target distribution")
         st.dataframe(df[target_col].value_counts(dropna=False).head(15).to_frame("count"), use_container_width=True)
 
     if st.button("Train tabular baseline model", type="primary"):
-        with st.spinner("Training model..."):
-            pipeline, metrics, X_test, y_test, preds, feature_columns = build_tabular_pipeline(df, target_col)
+        with st.spinner("Training tabular model..."):
+            pipeline, metrics, feature_columns = build_tabular_pipeline(df, target_col, test_size=test_size)
             st.session_state["tabular_bundle"] = {
                 "model": pipeline,
                 "target_col": target_col,
                 "feature_columns": feature_columns,
                 "metrics": metrics,
             }
-        st.success("Model trained and stored in session state.")
+        st.success("Tabular model trained.")
 
     bundle = st.session_state.get("tabular_bundle")
     if bundle:
@@ -334,9 +472,8 @@ def render_tabular_mode(df: pd.DataFrame, source_label: str, test_size: float) -
             result["prediction"] = predictions
 
             if hasattr(bundle["model"], "predict_proba"):
-                probs = bundle["model"].predict_proba(aligned)
-                confidence = probs.max(axis=1)
-                result["confidence"] = np.round(confidence, 3)
+                probabilities = bundle["model"].predict_proba(aligned)
+                result["confidence"] = np.round(probabilities.max(axis=1), 3)
 
             st.dataframe(result.head(50), use_container_width=True)
             st.download_button(
@@ -354,16 +491,19 @@ def render_tabular_mode(df: pd.DataFrame, source_label: str, test_size: float) -
         )
 
 
-def render_image_mode(samples: pd.DataFrame, source_label: str, image_size: int, test_size: float, max_per_class: int) -> None:
+def render_image_mode(samples: pd.DataFrame, source_label: str, image_size: int, test_size: float) -> None:
     st.subheader("Image dataset")
     st.caption(f"Source: {source_label}")
 
-    sampled = sample_image_frame(samples, max_per_class=max_per_class)
-    render_overview_cards(sampled, target_col="label")
+    labeled = samples[samples["label"].notna()].copy()
+    cols = st.columns(4)
+    cols[0].metric("Images", f"{len(samples):,}")
+    cols[1].metric("Labeled", f"{len(labeled):,}")
+    cols[2].metric("Classes", f"{labeled['label'].nunique() if not labeled.empty else 0:,}")
+    cols[3].metric("Unlabeled", f"{samples['label'].isna().sum():,}")
 
-    labeled = sampled[sampled["label"].notna()].copy()
     if labeled.empty:
-        st.warning("No class labels were inferred. Organize images into class folders to train a model.")
+        st.warning("No labels were inferred. Put images inside class folders.")
     else:
         st.write("Class distribution")
         st.dataframe(labeled["label"].value_counts().to_frame("count"), use_container_width=True)
@@ -371,66 +511,60 @@ def render_image_mode(samples: pd.DataFrame, source_label: str, image_size: int,
     left, right = st.columns([1.1, 0.9])
     with left:
         st.markdown("#### Sample images")
-        preview = sampled.head(12)
+        preview = samples.head(12)
         if preview.empty:
-            st.info("No images found in this folder.")
+            st.info("No images found in the selected folder.")
         else:
-            cols = st.columns(3)
+            img_cols = st.columns(3)
             for idx, row in enumerate(preview.itertuples(index=False)):
-                with cols[idx % 3]:
+                with img_cols[idx % 3]:
                     try:
-                        st.image(Image.open(row.path), caption=f"{row.label or 'unlabeled'}")
+                        st.image(Image.open(row.path), caption=row.label or "unlabeled")
                     except Exception:
                         st.write(f"Could not open: {row.path}")
     with right:
         st.markdown("#### Notes")
         st.write(
-            "- Put images in class folders for training.\n"
-            "- The baseline model is a fast, simple starter.\n"
-            "- You can replace it with a CNN later."
+            "- The image model is a fast baseline using flattened pixels.\n"
+            "- It is good for testing, not for production accuracy.\n"
+            "- You can later replace it with a CNN."
         )
 
     trainable = labeled["label"].nunique() >= 2 and len(labeled) >= 4
     if st.button("Train image baseline model", type="primary", disabled=not trainable):
-        with st.spinner("Training model..."):
-            pipeline, metrics, X_test, y_test, preds = build_image_model(
-                labeled[["path", "label"]],
-                image_size=image_size,
-                test_size=test_size,
-            )
+        with st.spinner("Training image model..."):
+            pipeline, metrics = build_image_model(labeled[["path", "label"]], image_size=image_size, test_size=test_size)
             st.session_state["image_bundle"] = {
                 "model": pipeline,
                 "image_size": image_size,
                 "metrics": metrics,
             }
-        st.success("Model trained and stored in session state.")
+        st.success("Image model trained.")
 
     bundle = st.session_state.get("image_bundle")
     if bundle:
         st.markdown("#### Results")
         st.metric("Accuracy", f"{bundle['metrics']['accuracy']:.3f}")
-        if "skipped" in bundle["metrics"]:
-            st.caption(f"Skipped unreadable images: {bundle['metrics']['skipped']}")
+        st.caption(f"Skipped unreadable images: {bundle['metrics']['skipped']}")
         st.dataframe(bundle["metrics"]["report"], use_container_width=True)
 
         st.markdown("#### Predict on uploaded images")
         uploaded_images = st.file_uploader(
             "Upload one or more images",
-            type=IMAGE_UPLOAD_TYPES,
+            type=sorted(ext.lstrip(".") for ext in IMAGE_EXTENSIONS),
             accept_multiple_files=True,
             key="image_predict_upload",
         )
         if uploaded_images:
             rows = []
+            model = bundle["model"].named_steps["model"]
             for uploaded in uploaded_images:
                 try:
                     vector = uploaded_image_to_vector(uploaded, bundle["image_size"])
-                    model = bundle["model"].named_steps["model"]
-                    pred = model.predict([vector])[0]
-                    row = {"file": uploaded.name, "prediction": pred}
+                    prediction = model.predict([vector])[0]
+                    row = {"file": uploaded.name, "prediction": prediction}
                     if hasattr(model, "predict_proba"):
-                        probs = model.predict_proba([vector])[0]
-                        row["confidence"] = float(np.max(probs))
+                        row["confidence"] = float(np.max(model.predict_proba([vector])[0]))
                     rows.append(row)
                 except Exception as exc:
                     rows.append({"file": uploaded.name, "prediction": f"error: {exc}"})
@@ -452,62 +586,116 @@ def render_image_mode(samples: pd.DataFrame, source_label: str, image_size: int,
         )
 
 
-def main() -> None:
-    st.set_page_config(page_title="Exercise Coach Starter", page_icon="🏋️", layout="wide")
-    st.title("Exercise Coach Starter")
-    st.write(
-        "A fast MVP for turning an exercise dataset into a simple coach product: "
-        "explore the data, train a baseline model, and test predictions."
-    )
+def resolve_source() -> tuple[Path | None, str | None]:
+    """Load either a local path or a GitHub repo and return a dataset root."""
 
     with st.sidebar:
-        st.header("Dataset source")
-        source_text = st.text_input(
-            "Path to your dataset folder or CSV",
-            value="data",
-            help="Example: data, data/exercises.csv, or a folder of class-organized images.",
-        )
-        test_size = st.slider("Test split", min_value=0.1, max_value=0.4, value=0.2, step=0.05)
-        image_size = st.slider("Image resize", min_value=32, max_value=128, value=64, step=16)
-        max_per_class = st.number_input(
-            "Max images per class",
-            min_value=5,
-            max_value=500,
-            value=50,
-            step=5,
-            help="Limits how many images per label are used for preview/training.",
-        )
+        st.header("Data source")
+        source_mode = st.radio("Choose source", ["GitHub repo", "Local path"], horizontal=False)
 
-    path = Path(source_text).expanduser()
-    if not path.exists():
+        if source_mode == "GitHub repo":
+            repo_url = st.text_input("GitHub repo URL", value=DEFAULT_GITHUB_REPO_URL)
+            branch = st.text_input("Preferred branch", value="main")
+
+            if st.button("Load GitHub repo", type="primary"):
+                with st.spinner("Downloading repository..."):
+                    root, loaded_branch = download_and_extract_github_repo(repo_url, preferred_branch=branch)
+                st.session_state["dataset_root"] = str(root)
+                st.session_state["dataset_label"] = f"{repo_url} (branch: {loaded_branch})"
+                st.session_state["source_mode"] = "GitHub repo"
+
+        else:
+            path_text = st.text_input(
+                "Local folder or CSV path",
+                value="data",
+                help="Use a folder, a CSV file, or a GitHub-repo extraction folder.",
+            )
+            path = Path(path_text).expanduser()
+            if path.exists():
+                st.session_state["dataset_root"] = str(path)
+                st.session_state["dataset_label"] = str(path)
+                st.session_state["source_mode"] = "Local path"
+            else:
+                st.info("Enter a valid local path to continue.")
+
+        if st.button("Clear loaded data"):
+            st.session_state.pop("dataset_root", None)
+            st.session_state.pop("dataset_label", None)
+            st.session_state.pop("tabular_bundle", None)
+            st.session_state.pop("image_bundle", None)
+            st.rerun()
+
+    root_text = st.session_state.get("dataset_root")
+    label = st.session_state.get("dataset_label")
+    if not root_text:
+        return None, None
+    return Path(root_text), label
+
+
+def main() -> None:
+    st.set_page_config(page_title="Exercise Coach Starter", layout="wide")
+    st.title("Exercise Coach Starter")
+    st.write(
+        "Load a public GitHub repo or a local folder, then explore the data and train a quick baseline model."
+    )
+
+    dataset_root, source_label = resolve_source()
+    if dataset_root is None:
         st.info(
-            "Point the sidebar at a dataset folder or CSV. "
-            "For image mode, use folders like `data/squat/*.jpg`."
+            "Load the GitHub repo you attached, or point the app at a local dataset folder to continue."
         )
         st.stop()
 
-    csv_path = find_first_csv(path)
-    if csv_path is not None:
-        df = load_csv(str(csv_path))
-        render_tabular_mode(df, source_label=str(csv_path), test_size=test_size)
-        return
+    st.success(f"Loaded: {source_label}")
 
-    image_samples = discover_image_samples(str(path))
-    if not image_samples.empty:
-        render_image_mode(
-            image_samples,
-            source_label=str(path),
-            image_size=image_size,
-            test_size=test_size,
-            max_per_class=int(max_per_class),
+    tabular_files = discover_tabular_files(dataset_root)
+    image_roots = discover_image_dataset_roots(dataset_root)
+    render_inventory(dataset_root)
+
+    if tabular_files and image_roots:
+        data_mode = st.radio("Detected data types", ["Tabular", "Images"], horizontal=True)
+    elif tabular_files:
+        data_mode = "Tabular"
+    elif image_roots:
+        data_mode = "Images"
+    else:
+        st.warning(
+            "No CSV/TSV or image folders were detected in that repo/folder. "
+            "The file inventory above shows what is available."
         )
-        return
+        st.stop()
 
-    st.warning(
-        "I could not detect a CSV file or any images. "
-        "Drop a CSV into the folder, or organize images into class subfolders."
-    )
+    st.divider()
+
+    if data_mode == "Tabular":
+        chosen_file = tabular_files[0]
+        if len(tabular_files) > 1:
+            chosen_file = st.selectbox(
+                "Choose a tabular file",
+                options=tabular_files,
+                format_func=lambda path: str(path.relative_to(dataset_root)),
+            )
+        df = load_csv_file(str(chosen_file))
+        render_tabular_mode(df, source_label=str(chosen_file), test_size=0.2)
+    else:
+        selected_root = image_roots[0]["path"]
+        if len(image_roots) > 1:
+            selected_root = st.selectbox(
+                "Choose the image dataset root",
+                options=[item["path"] for item in image_roots],
+                format_func=lambda path: str(path.relative_to(dataset_root)),
+            )
+        samples = discover_image_samples(dataset_root, selected_root)
+        render_image_mode(
+            samples,
+            source_label=str(selected_root),
+            image_size=64,
+            test_size=0.2,
+        )
 
 
 if __name__ == "__main__":
-    main()
+    if running_under_streamlit():
+        main()
+    else:
+        print("Run this app with: streamlit run streamlit_app.py")
