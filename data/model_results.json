@@ -1,0 +1,86 @@
+{
+  "models": [
+    {
+      "tag": "EXP. 01",
+      "title": "Target Muscle Classifier",
+      "note": "TF-IDF + Logistic Regression, predicting target muscle from instruction text alone.",
+      "metric_label": "Macro F1",
+      "metric_value": "0.71",
+      "bar_pct": 71,
+      "color": "primary"
+    },
+    {
+      "tag": "EXP. 02",
+      "title": "Secondary Muscle Prediction",
+      "note": "Multi-label One-vs-Rest Logistic Regression over text + equipment + target.",
+      "metric_label": "Micro F1 \u00b7 Jaccard 0.63",
+      "metric_value": "0.71",
+      "bar_pct": 71,
+      "color": "amber"
+    },
+    {
+      "tag": "EXP. 03",
+      "title": "Content-Based Recommender",
+      "note": "TF-IDF cosine similarity, filtered by equipment + target. Near-duplicate instructions (e.g. sit-up variants) return similarity 1.0 \u2014 a motivating case for an embedding upgrade.",
+      "metric_label": "Evaluation",
+      "metric_value": "qualitative",
+      "bar_pct": 100,
+      "color": "ink_soft"
+    }
+  ],
+  "per_class_f1": [
+    {"name": "abs", "f1": 0.889, "support": 34},
+    {"name": "pectorals", "f1": 0.892, "support": 32},
+    {"name": "biceps", "f1": 0.966, "support": 30},
+    {"name": "delts", "f1": 0.793, "support": 29},
+    {"name": "glutes", "f1": 0.625, "support": 29},
+    {"name": "triceps", "f1": 0.815, "support": 28},
+    {"name": "upper back", "f1": 0.703, "support": 18},
+    {"name": "lats", "f1": 0.647, "support": 16},
+    {"name": "calves", "f1": 1.0, "support": 12},
+    {"name": "quads", "f1": 0.483, "support": 9},
+    {"name": "forearms", "f1": 0.545, "support": 7},
+    {"name": "cardiovascular system", "f1": 0.667, "support": 6},
+    {"name": "hamstrings", "f1": 0.571, "support": 5},
+    {"name": "spine", "f1": 0.667, "support": 4},
+    {"name": "other", "f1": 0.333, "support": 3},
+    {"name": "traps", "f1": 0.8, "support": 3}
+  ],
+  "confusion": {
+    "classes": ["abs","biceps","calves","cardiovascular system","delts","forearms","glutes","hamstrings","lats","other","pectorals","quads","spine","traps","triceps","upper back"],
+    "cells": [
+      {"true":"abs","pred":"abs","count":28},{"true":"abs","pred":"cardiovascular system","count":1},{"true":"abs","pred":"glutes","count":1},{"true":"abs","pred":"other","count":1},{"true":"abs","pred":"quads","count":1},{"true":"abs","pred":"triceps","count":1},{"true":"abs","pred":"upper back","count":1},
+      {"true":"biceps","pred":"biceps","count":28},{"true":"biceps","pred":"delts","count":2},
+      {"true":"calves","pred":"calves","count":12},
+      {"true":"cardiovascular system","pred":"cardiovascular system","count":5},{"true":"cardiovascular system","pred":"quads","count":1},
+      {"true":"delts","pred":"abs","count":1},{"true":"delts","pred":"delts","count":23},{"true":"delts","pred":"forearms","count":1},{"true":"delts","pred":"glutes","count":1},{"true":"delts","pred":"pectorals","count":1},{"true":"delts","pred":"upper back","count":2},
+      {"true":"forearms","pred":"cardiovascular system","count":1},{"true":"forearms","pred":"delts","count":1},{"true":"forearms","pred":"forearms","count":3},{"true":"forearms","pred":"lats","count":1},{"true":"forearms","pred":"quads","count":1},
+      {"true":"glutes","pred":"cardiovascular system","count":1},{"true":"glutes","pred":"glutes","count":15},{"true":"glutes","pred":"hamstrings","count":3},{"true":"glutes","pred":"other","count":1},{"true":"glutes","pred":"quads","count":8},{"true":"glutes","pred":"spine","count":1},
+      {"true":"hamstrings","pred":"glutes","count":1},{"true":"hamstrings","pred":"hamstrings","count":4},
+      {"true":"lats","pred":"hamstrings","count":1},{"true":"lats","pred":"lats","count":11},{"true":"lats","pred":"triceps","count":1},{"true":"lats","pred":"upper back","count":3},
+      {"true":"other","pred":"delts","count":2},{"true":"other","pred":"other","count":1},
+      {"true":"pectorals","pred":"cardiovascular system","count":1},{"true":"pectorals","pred":"pectorals","count":29},{"true":"pectorals","pred":"triceps","count":2},
+      {"true":"quads","pred":"delts","count":1},{"true":"quads","pred":"hamstrings","count":1},{"true":"quads","pred":"quads","count":7},
+      {"true":"spine","pred":"glutes","count":1},{"true":"spine","pred":"spine","count":3},
+      {"true":"traps","pred":"lats","count":1},{"true":"traps","pred":"traps","count":2},
+      {"true":"triceps","pred":"lats","count":3},{"true":"triceps","pred":"pectorals","count":2},{"true":"triceps","pred":"quads","count":1},{"true":"triceps","pred":"triceps","count":22},
+      {"true":"upper back","pred":"lats","count":2},{"true":"upper back","pred":"pectorals","count":1},{"true":"upper back","pred":"quads","count":1},{"true":"upper back","pred":"spine","count":1},{"true":"upper back","pred":"upper back","count":13}
+    ]
+  },
+  "heatmap": {
+    "equipment_list": ["body weight","dumbbell","cable","barbell","leverage machine","band","smith machine","kettlebell","weighted","stability ball"],
+    "category_list": ["back","cardio","chest","lower arms","lower legs","neck","shoulders","upper arms","upper legs","waist"],
+    "cells": [
+      {"equipment":"body weight","category":"back","count":59},{"equipment":"body weight","category":"cardio","count":21},{"equipment":"body weight","category":"chest","count":36},{"equipment":"body weight","category":"lower arms","count":3},{"equipment":"body weight","category":"lower legs","count":13},{"equipment":"body weight","category":"neck","count":2},{"equipment":"body weight","category":"shoulders","count":2},{"equipment":"body weight","category":"upper arms","count":30},{"equipment":"body weight","category":"upper legs","count":70},{"equipment":"body weight","category":"waist","count":89},
+      {"equipment":"dumbbell","category":"back","count":14},{"equipment":"dumbbell","category":"cardio","count":1},{"equipment":"dumbbell","category":"chest","count":44},{"equipment":"dumbbell","category":"lower arms","count":15},{"equipment":"dumbbell","category":"lower legs","count":10},{"equipment":"dumbbell","category":"neck","count":0},{"equipment":"dumbbell","category":"shoulders","count":59},{"equipment":"dumbbell","category":"upper arms","count":125},{"equipment":"dumbbell","category":"upper legs","count":24},{"equipment":"dumbbell","category":"waist","count":2},
+      {"equipment":"cable","category":"back","count":43},{"equipment":"cable","category":"cardio","count":0},{"equipment":"cable","category":"chest","count":23},{"equipment":"cable","category":"lower arms","count":3},{"equipment":"cable","category":"lower legs","count":2},{"equipment":"cable","category":"neck","count":0},{"equipment":"cable","category":"shoulders","count":18},{"equipment":"cable","category":"upper arms","count":48},{"equipment":"cable","category":"upper legs","count":5},{"equipment":"cable","category":"waist","count":15},
+      {"equipment":"barbell","category":"back","count":15},{"equipment":"barbell","category":"cardio","count":0},{"equipment":"barbell","category":"chest","count":13},{"equipment":"barbell","category":"lower arms","count":8},{"equipment":"barbell","category":"lower legs","count":6},{"equipment":"barbell","category":"neck","count":0},{"equipment":"barbell","category":"shoulders","count":19},{"equipment":"barbell","category":"upper arms","count":33},{"equipment":"barbell","category":"upper legs","count":50},{"equipment":"barbell","category":"waist","count":10},
+      {"equipment":"leverage machine","category":"back","count":25},{"equipment":"leverage machine","category":"cardio","count":3},{"equipment":"leverage machine","category":"chest","count":10},{"equipment":"leverage machine","category":"lower arms","count":1},{"equipment":"leverage machine","category":"lower legs","count":7},{"equipment":"leverage machine","category":"neck","count":0},{"equipment":"leverage machine","category":"shoulders","count":8},{"equipment":"leverage machine","category":"upper arms","count":9},{"equipment":"leverage machine","category":"upper legs","count":13},{"equipment":"leverage machine","category":"waist","count":5},
+      {"equipment":"band","category":"back","count":10},{"equipment":"band","category":"cardio","count":0},{"equipment":"band","category":"chest","count":2},{"equipment":"band","category":"lower arms","count":2},{"equipment":"band","category":"lower legs","count":3},{"equipment":"band","category":"neck","count":0},{"equipment":"band","category":"shoulders","count":7},{"equipment":"band","category":"upper arms","count":5},{"equipment":"band","category":"upper legs","count":12},{"equipment":"band","category":"waist","count":13},
+      {"equipment":"smith machine","category":"back","count":6},{"equipment":"smith machine","category":"cardio","count":0},{"equipment":"smith machine","category":"chest","count":10},{"equipment":"smith machine","category":"lower arms","count":2},{"equipment":"smith machine","category":"lower legs","count":6},{"equipment":"smith machine","category":"neck","count":0},{"equipment":"smith machine","category":"shoulders","count":7},{"equipment":"smith machine","category":"upper arms","count":4},{"equipment":"smith machine","category":"upper legs","count":12},{"equipment":"smith machine","category":"waist","count":1},
+      {"equipment":"kettlebell","category":"back","count":5},{"equipment":"kettlebell","category":"cardio","count":0},{"equipment":"kettlebell","category":"chest","count":4},{"equipment":"kettlebell","category":"lower arms","count":1},{"equipment":"kettlebell","category":"lower legs","count":0},{"equipment":"kettlebell","category":"neck","count":0},{"equipment":"kettlebell","category":"shoulders","count":17},{"equipment":"kettlebell","category":"upper arms","count":2},{"equipment":"kettlebell","category":"upper legs","count":7},{"equipment":"kettlebell","category":"waist","count":5},
+      {"equipment":"weighted","category":"back","count":6},{"equipment":"weighted","category":"cardio","count":0},{"equipment":"weighted","category":"chest","count":3},{"equipment":"weighted","category":"lower arms","count":2},{"equipment":"weighted","category":"lower legs","count":1},{"equipment":"weighted","category":"neck","count":0},{"equipment":"weighted","category":"shoulders","count":3},{"equipment":"weighted","category":"upper arms","count":5},{"equipment":"weighted","category":"upper legs","count":5},{"equipment":"weighted","category":"waist","count":11},
+      {"equipment":"stability ball","category":"back","count":11},{"equipment":"stability ball","category":"cardio","count":0},{"equipment":"stability ball","category":"chest","count":4},{"equipment":"stability ball","category":"lower arms","count":0},{"equipment":"stability ball","category":"lower legs","count":0},{"equipment":"stability ball","category":"neck","count":0},{"equipment":"stability ball","category":"shoulders","count":0},{"equipment":"stability ball","category":"upper arms","count":3},{"equipment":"stability ball","category":"upper legs","count":5},{"equipment":"stability ball","category":"waist","count":5}
+    ]
+  }
+}
